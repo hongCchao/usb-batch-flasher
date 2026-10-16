@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>..\..\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>USB批量烧录工具</AssemblyName>
+    <RootNamespace>UsbBatchTool</RootNamespace>
+    <Version>1.0.1</Version>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Remove="App.xaml;MainWindow.xaml" />
+    <EmbeddedResource Include="App.xaml" LogicalName="UsbBatchTool.App.xaml" />
+    <EmbeddedResource Include="MainWindow.xaml" LogicalName="UsbBatchTool.MainWindow.xaml" />
+    <EmbeddedResource Include="..\..\app.ico" LogicalName="UsbBatchTool.Assets.app.ico" />
+    <EmbeddedResource Include="..\..\已插入.png" LogicalName="UsbBatchTool.Assets.connected.png" />
+    <EmbeddedResource Include="..\..\未插入.png" LogicalName="UsbBatchTool.Assets.disconnected.png" />
+    <EmbeddedResource Include="..\..\烧录失败.png" LogicalName="UsbBatchTool.Assets.failed.png" />
+  </ItemGroup>
+</Project>
