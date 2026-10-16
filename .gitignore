@@ -1,0 +1,33 @@
+# Local build tools and downloaded dependencies
+.tools/
+
+# .NET build output
+**/bin/
+**/obj/
+dist/
+TestResults/
+artifacts/
+
+# Application runtime data; paths and logs may contain personal information
+**/cache/
+**/logs/
+**/config/
+settings.json
+*.log
+
+# User-supplied images, archives and release packages
+*.img
+*.img.gz
+*.iso
+*.zip
+
+# Local IDE and operating system files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+Thumbs.db
+Desktop.ini
