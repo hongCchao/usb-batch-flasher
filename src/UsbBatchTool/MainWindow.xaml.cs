@@ -54,7 +54,7 @@ public partial class MainWindow : Window
         _demo = demo;
         _settings = _store.Load();
         InitializeComponent();
-        Title = "USB 批量烧录工具 v1.0.1" + (demo ? " · 演示模式" : "");
+        Title = "USB 批量烧录工具 v1.0.2" + (demo ? " · 演示模式" : "");
         Width = Math.Min(1300, SystemParameters.WorkArea.Width - 16);
         Height = Math.Min(860, SystemParameters.WorkArea.Height - 16);
         MinWidth = Math.Min(1060, Width);

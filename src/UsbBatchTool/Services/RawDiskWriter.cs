@@ -103,6 +103,7 @@ public sealed class RawDiskWriter
         var lockedVolumes = new List<SafeFileHandle>();
         var destructiveOperationStarted = false;
         var succeeded = false;
+        var restoreOnline = false;
         try
         {
             progress.Report(new OperationProgress("卸载卷", 0, source.Length, Detail: "锁定并卸载目标设备的所有现有卷"));
@@ -120,9 +121,23 @@ public sealed class RawDiskWriter
             if (!NativeDisk.TryIsWritable(diskHandle))
                 throw NativeDisk.LastError("目标磁盘不可写，请检查写保护或设备状态。");
 
-            // FileStream owns this same already verified handle. No PhysicalDrive
-            // path is reopened after the identity check, even during verification.
-            using var target = new FileStream(diskHandle, FileAccess.ReadWrite, 1, isAsync: false);
+            // Windows can repair/expand a newly written GPT while the USB disk is
+            // online, changing sector 1 before read-back verification finishes.
+            // Temporary, non-persistent offline state suppresses filesystem and
+            // partition-manager interference while retaining this exact handle.
+            var wasOffline = NativeDisk.QueryOffline(diskHandle)
+                ?? throw new IOException("无法确认目标磁盘脱机状态，尚未开始写入。");
+            if (!wasOffline)
+            {
+                restoreOnline = true;
+                if (!NativeDisk.TrySetOffline(diskHandle, true) || NativeDisk.QueryOffline(diskHandle) != true)
+                    throw NativeDisk.LastError("无法临时脱机目标磁盘，已阻止写入以避免分区表被系统改动。");
+            }
+            log($"[{disk.DisplayName}] 已临时脱机；写入和校验期间禁止系统自动挂载或调整 GPT。");
+
+            // Keep the verified handle. Raw disk handles are not reliably seekable
+            // through FileStream; use explicit Win32 offsets for every operation.
+            using var target = new PhysicalDiskStream(diskHandle, diskSize, sectorSize, writable: true);
             ct.ThrowIfCancellationRequested();
             progress.Report(new OperationProgress("清理旧分区", 0, source.Length, Detail: "清除旧分区头和磁盘尾部的旧 GPT 备份"));
             destructiveOperationStarted = true;
@@ -132,11 +147,11 @@ public sealed class RawDiskWriter
             if (!NativeDisk.TryDeleteDriveLayout(diskHandle))
                 log($"[{disk.DisplayName}] 驱动不支持删除分区布局（Win32 {Marshal.GetLastWin32Error()}），改为清理磁盘首尾分区信息。");
             ClearOldLayout(target, diskSize, sectorSize, ct);
-            target.Flush(flushToDisk: true);
+            target.Flush();
             log($"[{disk.DisplayName}] 已清理旧分区信息，开始从物理磁盘偏移 0 写入。");
 
             CopyImage(source, target, sectorSize, progress, ct);
-            target.Flush(flushToDisk: true);
+            target.Flush();
             log($"[{disk.DisplayName}] 镜像写入完成，已刷新设备缓存。");
 
             if (verify)
@@ -147,7 +162,7 @@ public sealed class RawDiskWriter
 
             ct.ThrowIfCancellationRequested();
             progress.Report(new OperationProgress("刷新分区", source.Length, source.Length));
-            // target still owns the verified handle at this point.
+            // The original verified handle is still held open at this point.
             if (!NativeDisk.TryUpdateProperties(diskHandle))
                 log($"[{disk.DisplayName}] 数据已完成，但刷新分区失败（Win32 {Marshal.GetLastWin32Error()}）；可能需要重新插拔 U 盘。");
             succeeded = true;
@@ -167,6 +182,16 @@ public sealed class RawDiskWriter
         {
             // Closing the handles releases all locks, including cancellation paths.
             foreach (var volume in lockedVolumes) volume.Dispose();
+            if (restoreOnline)
+            {
+                if (!NativeDisk.TrySetOffline(diskHandle, false) || NativeDisk.QueryOffline(diskHandle) != false)
+                    log($"[{disk.DisplayName}] 警告：恢复联机失败，请重新插拔 U 盘；Win32 {Marshal.GetLastWin32Error()}。");
+                else
+                {
+                    NativeDisk.TryUpdateProperties(diskHandle);
+                    log($"[{disk.DisplayName}] 已恢复联机状态。");
+                }
+            }
         }
 
         if (succeeded)
@@ -225,7 +250,7 @@ public sealed class RawDiskWriter
         }
     }
 
-    private static void ClearOldLayout(FileStream target, long diskSize, int sectorSize, CancellationToken ct)
+    private static void ClearOldLayout(Stream target, long diskSize, int sectorSize, CancellationToken ct)
     {
         var cleanSize = Math.Min(diskSize, AlignUp(1024 * 1024, sectorSize));
         cleanSize -= cleanSize % sectorSize;
@@ -244,7 +269,7 @@ public sealed class RawDiskWriter
         target.Position = 0;
     }
 
-    private static void CopyImage(FileStream source, FileStream target, int sectorSize,
+    private static void CopyImage(Stream source, Stream target, int sectorSize,
         IProgress<OperationProgress> progress, CancellationToken ct)
     {
         var bufferSize = checked((int)AlignUp(PreferredBufferSize, sectorSize));
@@ -273,7 +298,7 @@ public sealed class RawDiskWriter
         }
     }
 
-    private static void VerifyImage(FileStream source, FileStream target, int sectorSize,
+    private static void VerifyImage(Stream source, Stream target, int sectorSize,
         IProgress<OperationProgress> progress, CancellationToken ct)
     {
         var bufferSize = checked((int)AlignUp(PreferredBufferSize, sectorSize));
@@ -294,7 +319,12 @@ public sealed class RawDiskWriter
             var readCount = checked((int)AlignUp(count, sectorSize));
             ReadExactly(target, actualBytes, readCount);
             if (!sourceBytes.AsSpan(0, count).SequenceEqual(actualBytes.AsSpan(0, count)))
-                throw new IOException($"读回校验不一致，错误位于镜像偏移 {completed:N0} 字节附近。");
+            {
+                var mismatch = 0;
+                while (mismatch < count && sourceBytes[mismatch] == actualBytes[mismatch]) mismatch++;
+                throw new IOException($"读回校验不一致，准确偏移 {completed + mismatch:N0} 字节；" +
+                    $"预期 0x{sourceBytes[mismatch]:X2}，实际 0x{actualBytes[mismatch]:X2}。");
+            }
             completed += count;
             if (elapsed.Elapsed - lastReport >= TimeSpan.FromMilliseconds(100) || completed == source.Length)
             {

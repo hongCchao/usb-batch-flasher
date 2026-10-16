@@ -45,6 +45,7 @@ internal static class NativeDisk
     internal const uint StorageDeviceProperty = 0;
     internal const uint PropertyStandardQuery = 0;
     internal const ulong DiskAttributeReadOnly = 0x0000000000000002UL;
+    internal const ulong DiskAttributeOffline = 0x0000000000000001UL;
 
     private static uint CtlCode(uint deviceType, uint function, uint method, uint access) =>
         (deviceType << 16) | (access << 14) | (function << 2) | method;
@@ -319,13 +320,31 @@ internal static class NativeDisk
     }
 
     internal static bool TrySetReadOnly(SafeFileHandle handle, bool readOnly)
+        => TrySetAttribute(handle, DiskAttributeReadOnly, readOnly);
+
+    internal static bool TrySetOffline(SafeFileHandle handle, bool offline)
+        => TrySetAttribute(handle, DiskAttributeOffline, offline);
+
+    internal static bool? QueryOffline(SafeFileHandle handle)
+    {
+        var size = Marshal.SizeOf<DiskAttributes>();
+        var buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            if (!DeviceIoControl(handle, IoctlDiskGetDiskAttributes, IntPtr.Zero, 0, buffer, size, out _)) return null;
+            return (Marshal.PtrToStructure<DiskAttributes>(buffer).Attributes & DiskAttributeOffline) != 0;
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    private static bool TrySetAttribute(SafeFileHandle handle, ulong mask, bool enabled)
     {
         var attrs = new SetDiskAttributes
         {
             Version = (uint)Marshal.SizeOf<SetDiskAttributes>(),
             Persist = 0,
-            Attributes = readOnly ? DiskAttributeReadOnly : 0,
-            AttributesMask = DiskAttributeReadOnly
+            Attributes = enabled ? mask : 0,
+            AttributesMask = mask
         };
         var size = Marshal.SizeOf<SetDiskAttributes>();
         var buffer = Marshal.AllocHGlobal(size);

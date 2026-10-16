@@ -383,6 +383,70 @@ public static class UsbServiceTestRunner
             scope.Assert(actual.SequenceEqual(sentinel), "预取消校验不修改目标内容");
             scope.Passed.Add("纯文件预取消：写入、分区清理和校验均取消且目标内容保持不变");
         }
+
+        // Exercise the production Win32 offset/read/write adapter on an isolated
+        // regular file. This never opens a physical device or changes disk state.
+        string nativePath = scope.FilePath("native-io-target.bin");
+        File.WriteAllBytes(nativePath, Enumerable.Repeat((byte)0xA5, 6 * clearBytes).ToArray());
+        using (var file = OpenTestFile(scope, nativePath, FileAccess.ReadWrite))
+        using (var source = OpenTestFile(scope, sourcePath, FileAccess.Read))
+        using (var native = OpenNativeAdapter(file, writable: true))
+        {
+            CallRaw("ClearOldLayout", native, native.Length, sector, CancellationToken.None);
+            native.Flush();
+            native.Position = native.Length - sector;
+            var tail = new byte[sector];
+            native.ReadExactly(tail);
+            scope.Assert(tail.All(b => b == 0), "原生定位后读取已清零的磁盘尾部");
+            CallRaw("CopyImage", source, native, sector, new NoProgress(), CancellationToken.None);
+            native.Flush();
+            CallRaw("VerifyImage", source, native, sector, new NoProgress(), CancellationToken.None);
+            scope.Assert(native.Position == ((source.Length + sector - 1) / sector) * sector,
+                "原生校验从偏移 0 覆盖全部镜像并补齐末尾扇区");
+            native.Position = 0;
+            var first = new byte[sector];
+            native.ReadExactly(first);
+            scope.Assert(first.SequenceEqual(rawBytes.Take(sector)), "原生首扇区写入与源镜像一致");
+            native.Position = 4 * clearBytes;
+            var final = new byte[sector];
+            native.ReadExactly(final);
+            scope.Assert(final.Take(123).SequenceEqual(rawBytes.Skip(4 * clearBytes)), "原生跨缓冲区定位正确");
+            scope.Assert(final.Skip(123).All(b => b == 0), "原生末尾扇区填充为零");
+            bool unaligned = false;
+            try { native.Position = 1; } catch (IOException) { unaligned = true; }
+            scope.Assert(unaligned, "原生接口拒绝非整扇区定位");
+            native.Position = native.Length;
+            bool overrun = false;
+            try { native.Write(first, 0, first.Length); } catch (IOException) { overrun = true; }
+            scope.Assert(overrun, "原生接口拒绝超出目标容量写入");
+            native.Position = 512;
+            var corrupt = new byte[sector];
+            native.ReadExactly(corrupt);
+            byte expected = corrupt[16];
+            corrupt[16] ^= 0x80;
+            native.Position = 512;
+            native.Write(corrupt, 0, corrupt.Length);
+            native.Flush();
+            bool exactMismatch = false;
+            try { CallRaw("VerifyImage", source, native, sector, new NoProgress(), CancellationToken.None); }
+            catch (IOException ex) { exactMismatch = ex.Message.Contains("528") && ex.Message.Contains($"0x{expected:X2}"); }
+            scope.Assert(exactMismatch, "原生校验准确报告 GPT 头偏移 528 字节及预期内容");
+        }
+        using (var file = OpenTestFile(scope, nativePath, FileAccess.Read))
+        using (var native = OpenNativeAdapter(file, writable: false))
+        {
+            bool rejected = false;
+            try { native.Write(new byte[sector], 0, sector); } catch (NotSupportedException) { rejected = true; }
+            scope.Assert(rejected, "只读原生适配器拒绝写入");
+        }
+        scope.Passed.Add("原生磁盘 I/O 适配器：普通测试文件上的首尾定位、跨块写入、读回、越界和只读保护通过");
+    }
+
+    private static Stream OpenNativeAdapter(FileStream file, bool writable)
+    {
+        var type = typeof(RawDiskWriter).Assembly.GetType("UsbBatchTool.Services.PhysicalDiskStream", true)!;
+        return (Stream)Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, args: new object[] { file.SafeFileHandle, file.Length, 512, writable }, culture: null)!;
     }
 
     private static FileStream OpenTestFile(TestScope scope, string path, FileAccess access, FileMode mode = FileMode.Open)
@@ -401,7 +465,7 @@ public static class UsbServiceTestRunner
 
     private static void CallRaw(string name, params object[] arguments)
     {
-        // Only these three pure FileStream algorithms are permitted. Never invoke
+        // Only these three stream algorithms are permitted. Never invoke
         // WriteAsync, WriteCore, NativeDisk, DeviceScanner, or any physical API.
         if (name != "CopyImage" && name != "VerifyImage" && name != "ClearOldLayout")
             throw new InvalidOperationException("不允许调用此写入器方法。");
